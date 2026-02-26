@@ -1,0 +1,10 @@
+gating:
+  metadata_threshold: 0.70  # θ_meta
+
+fusion:
+  alpha: 0.60               # score_final = α*meta + (1-α)*text
+  decision_threshold: 0.50  # θ_final
+
+explainability:
+  enabled: true
+  top_k: 10
