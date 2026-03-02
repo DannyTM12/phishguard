@@ -33,7 +33,6 @@ import logging
 import platform
 import time
 from contextlib import asynccontextmanager
-from pathlib import Path
 from typing import Annotated, Any, AsyncGenerator
 
 from fastapi import Depends, FastAPI, HTTPException, Request, status
@@ -155,6 +154,18 @@ class ClassifyResponse(BaseModel):
             "Ausente en producción con modelos entrenados."
         ),
     )
+    # Hito 3: explicación SHAP top-K de las features de metadatos.
+    # Presente solo si config.explainability.enabled = true y SHAP está instalado.
+    # Ejemplo: {"has_ip_url": 0.312, "has_url_shortener": 0.201, ...}
+    explanation: dict[str, float] | None = Field(
+        default=None,
+        description=(
+            "Top features que explican la predicción según SHAP (SHapley Additive "
+            "exPlanations) sobre el submodelo de metadatos. Cada clave es el nombre "
+            "de la feature y el valor es su contribución SHAP a la clase phishing. "
+            "Null si la explicabilidad está desactivada o SHAP no está instalado."
+        ),
+    )
 
 
 class HealthResponse(BaseModel):
@@ -207,6 +218,17 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     El bloque ANTES del `yield` se ejecuta al arrancar el servidor.
     El bloque DESPUÉS del `yield` se ejecuta al apagarlo.
+
+    ─────────────────────────────────────────────────────────────────
+    HITO 2: Para inyectar modelos entrenados, reemplaza las líneas
+    marcadas con [HITO 2] por la carga real de los pickles:
+
+        from phishguard.models.meta_submodel import MetaSubModel
+        from phishguard.models.text_submodel import TextSubModel
+
+        meta = MetaSubModel.load("models/meta.pkl")      # [HITO 2]
+        text = TextSubModel.load("models/text.pkl")      # [HITO 2]
+    ─────────────────────────────────────────────────────────────────
     """
     log.info("Iniciando PhishGuard API...")
 
@@ -259,8 +281,8 @@ app = FastAPI(
     description=(
         "Microservicio de detección de phishing basado en fusión tardía "
         "de señales semánticas (NLP) y técnicas (metadatos/URLs).\n\n"
-        "**Hito 2**: El submodelo de metadatos usa RandomForest entrenado. "
-        "El submodelo de texto sigue siendo heurístico."
+        "**Hito 1**: Los submodelos son heurísticos (dummy). "
+        "El flujo de gating y fusión está completamente implementado."
     ),
     version=_PHISHGUARD_VERSION,
     lifespan=lifespan,
@@ -388,7 +410,7 @@ async def health() -> HealthResponse:
         "la clasificación (phishing / legitimate) junto con scores "
         "intermedios y detalles del gating.\n\n"
         "El campo `warning` estará presente si se están usando modelos "
-        "heurísticos en lugar de modelos entrenados reales."
+        "heurísticos (Hito 1) en lugar de modelos entrenados reales."
     ),
     tags=["clasificación"],
     responses={
@@ -423,12 +445,13 @@ async def classify(
         sender=request_body.sender,
     )
 
-    # Advertencia si los modelos son dummy
+    # Advertencia si los modelos son dummy (solo en Hito 1)
     warning: str | None = None
     if engine.is_using_dummy_models:
         warning = (
-            "Al menos un submodelo activo es heurístico. "
-            "Sustituye text_model en lifespan() para producción completa."
+            "Los submodelos activos son heurísticos (Hito 1). "
+            "Los scores no reflejan un modelo entrenado. "
+            "Sustituye meta_model y text_model en lifespan() para producción."
         )
 
     return ClassifyResponse(
@@ -447,4 +470,5 @@ async def classify(
         meta_model_name=result.meta_model_name,
         text_model_name=result.text_model_name,
         warning=warning,
+        explanation=result.explanation,
     )

@@ -165,6 +165,9 @@ class PredictionResult:
     latency_ms: float
     meta_model_name: str
     text_model_name: str | None
+    # Hito 3: valores SHAP top-K para el submodelo de metadatos.
+    # None si la explicabilidad está desactivada en la config o SHAP falla.
+    explanation: dict[str, float] | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -437,14 +440,37 @@ class PhishGuardEngine:
                     f"Debe tener predict_proba() y model_name."
                 )
 
+        # ── Hito 3: Inicializar el explainer SHAP si está habilitado ──────────
+        # Import local para evitar dependencias circulares a nivel de módulo.
+        self._explainer = None
+        if getattr(self._config, "explainability", None) and                 getattr(self._config.explainability, "enabled", False):
+            try:
+                from phishguard.explainability.explainer import PhishGuardExplainer
+                top_k = getattr(self._config.explainability, "top_k", 5)
+                self._explainer = PhishGuardExplainer(
+                    meta_model=self._meta_model,
+                    top_k=top_k,
+                )
+                log.info(
+                    "Explicabilidad SHAP activa — %s",
+                    self._explainer,
+                )
+            except Exception as exc:
+                log.warning(
+                    "No se pudo inicializar PhishGuardExplainer: %s. "
+                    "explain() devolverá None en todas las predicciones.",
+                    exc,
+                )
+
         log.info(
             "PhishGuardEngine inicializado — meta=%s | text=%s | "
-            "θ_meta=%.2f | α=%.2f | θ_final=%.2f",
+            "θ_meta=%.2f | α=%.2f | θ_final=%.2f | explainer=%s",
             self._meta_model.model_name,
             self._text_model.model_name,
             self._config.gating.metadata_threshold,
             self._config.fusion.alpha,
             self._config.fusion.decision_threshold,
+            "enabled" if self._explainer is not None else "disabled",
         )
 
     # ── Singleton ───────────────────────────────────────────────────────────
@@ -536,6 +562,13 @@ class PhishGuardEngine:
             self._meta_model.model_name,
         )
 
+        # ── Paso 2b: Explicación SHAP (opcional, no bloquea si falla) ─────────
+        explanation: dict[str, float] | None = None
+        if self._explainer is not None:
+            explanation = self._explainer.explain_metadata(metadata_features)
+            if explanation:
+                log.debug("SHAP top-%d: %s", len(explanation), explanation)
+
         # ── Paso 3: Gating ──────────────────────────────────────────────────
         gating_activated = apply_gating(
             score_meta=score_meta,
@@ -608,6 +641,7 @@ class PhishGuardEngine:
             latency_ms=round(latency_ms, 3),
             meta_model_name=self._meta_model.model_name,
             text_model_name=text_model_name,
+            explanation=explanation if explanation else None,
         )
 
     # ── Propiedades de introspección ────────────────────────────────────────
