@@ -33,6 +33,7 @@ import logging
 import platform
 import time
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Annotated, Any, AsyncGenerator
 
 from fastapi import Depends, FastAPI, HTTPException, Request, status
@@ -206,23 +207,25 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     El bloque ANTES del `yield` se ejecuta al arrancar el servidor.
     El bloque DESPUÉS del `yield` se ejecuta al apagarlo.
-
-    ─────────────────────────────────────────────────────────────────
-    HITO 2: Para inyectar modelos entrenados, reemplaza las líneas
-    marcadas con [HITO 2] por la carga real de los pickles:
-
-        from phishguard.models.meta_submodel import MetaSubModel
-        from phishguard.models.text_submodel import TextSubModel
-
-        meta = MetaSubModel.load("models/meta.pkl")      # [HITO 2]
-        text = TextSubModel.load("models/text.pkl")      # [HITO 2]
-    ─────────────────────────────────────────────────────────────────
     """
     log.info("Iniciando PhishGuard API...")
 
-    # ── [HITO 1] Modelos dummy — reemplazar en Hito 2 ─────────────────────
-    meta_model: SubModel | None = None   # → usa _DummyMetaModel
-    text_model: SubModel | None = None   # → usa _DummyTextModel
+    # ── [HITO 2] Modelos reales ───────────────────────────────────────────
+    from phishguard.models.meta_submodel import MetaSubModel
+    from phishguard.models.text_submodel import TextSubModel
+    from pathlib import Path
+
+    try:
+        meta_model: SubModel | None = MetaSubModel.load(Path("artifacts/meta_model.pkl"))
+    except FileNotFoundError:
+        log.warning("Modelo de metadatos no encontrado. Usando Dummy.")
+        meta_model = None
+
+    try:
+        text_model: SubModel | None = TextSubModel.load(Path("artifacts/text_model.pkl"))
+    except FileNotFoundError:
+        log.warning("Modelo de texto no encontrado. Usando Dummy.")
+        text_model = None
     # ──────────────────────────────────────────────────────────────────────
 
     try:
@@ -256,8 +259,8 @@ app = FastAPI(
     description=(
         "Microservicio de detección de phishing basado en fusión tardía "
         "de señales semánticas (NLP) y técnicas (metadatos/URLs).\n\n"
-        "**Hito 1**: Los submodelos son heurísticos (dummy). "
-        "El flujo de gating y fusión está completamente implementado."
+        "**Hito 2**: El submodelo de metadatos usa RandomForest entrenado. "
+        "El submodelo de texto sigue siendo heurístico."
     ),
     version=_PHISHGUARD_VERSION,
     lifespan=lifespan,
@@ -385,7 +388,7 @@ async def health() -> HealthResponse:
         "la clasificación (phishing / legitimate) junto con scores "
         "intermedios y detalles del gating.\n\n"
         "El campo `warning` estará presente si se están usando modelos "
-        "heurísticos (Hito 1) en lugar de modelos entrenados reales."
+        "heurísticos en lugar de modelos entrenados reales."
     ),
     tags=["clasificación"],
     responses={
@@ -420,13 +423,12 @@ async def classify(
         sender=request_body.sender,
     )
 
-    # Advertencia si los modelos son dummy (solo en Hito 1)
+    # Advertencia si los modelos son dummy
     warning: str | None = None
     if engine.is_using_dummy_models:
         warning = (
-            "Los submodelos activos son heurísticos (Hito 1). "
-            "Los scores no reflejan un modelo entrenado. "
-            "Sustituye meta_model y text_model en lifespan() para producción."
+            "Al menos un submodelo activo es heurístico. "
+            "Sustituye text_model en lifespan() para producción completa."
         )
 
     return ClassifyResponse(
