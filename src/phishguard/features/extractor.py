@@ -10,7 +10,7 @@ representaciones listas para ser consumidas por los submodelos.
         (Random Forest / XGBoost) y para el gating.
 
   • extract_text_features() → str
-        Texto preparado para TF-IDF o Transformer (BERT/DistilBERT).
+        Texto preparado para TF-IDF + LR (Logistic Regression).
 
 Dependencias
 ------------
@@ -33,9 +33,8 @@ from __future__ import annotations
 
 import math
 import re
-import string
 from collections import Counter
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Final
 
 from phishguard.preprocessing.text_cleaner import (
@@ -385,7 +384,6 @@ class FeatureExtractor:
             body, normalize_unicode=self._cfg.normalize_unicode
         )
         domains = extract_domains(urls)
-        body_lower = body_clean.lower()
 
         # ── Grupo 1: Longitudes y conteos básicos ──────────────────────────
         features: dict[str, float | int | bool] = {
@@ -459,12 +457,11 @@ class FeatureExtractor:
 
         Aplica la limpieza completa (strip_html, normalize_unicode,
         normalize_whitespace) y concatena asunto + cuerpo con un
-        separador reconocible por los tokenizadores de Transformer
-        (compatible con el token [SEP] de BERT).
+        separador [SEP] que delimita ambos segmentos para el
+        vectorizador TF-IDF.
 
         El resultado es un string listo para:
           • sklearn TfidfVectorizer.transform([text])
-          • transformers.AutoTokenizer(text, ...)
           • Cualquier otro modelo que consuma texto como entrada
 
         Args:
@@ -489,9 +486,8 @@ class FeatureExtractor:
         else:
             combined = body_clean
 
-        # Truncar a max_text_length caracteres
-        # (para BERT: el tokenizador trunca a 512 tokens internamente,
-        #  pero limitar aquí evita procesamiento innecesario)
+        # Truncar a max_text_length caracteres para evitar inputs
+        # desproporcionados en el vectorizador TF-IDF
         if len(combined) > self._cfg.max_text_length:
             combined = combined[: self._cfg.max_text_length]
 

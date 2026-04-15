@@ -17,7 +17,7 @@ pandas .apply() o en pipelines de streaming.
 
 Dependencias
 ------------
-Solo biblioteca estándar: re, html, unicodedata, string.
+Solo biblioteca estándar: re, html, unicodedata.
 Sin pandas, sin sklearn, sin transformers — el módulo es importable
 en cualquier entorno, incluido el microservicio de inferencia.
 """
@@ -26,7 +26,6 @@ from __future__ import annotations
 
 import html
 import re
-import string
 import unicodedata
 from typing import Final
 

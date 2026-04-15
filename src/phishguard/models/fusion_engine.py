@@ -26,7 +26,7 @@ Flujo de decisión
           ▼
   ┌─────────────────────┐
   │  SubmodelText       │  → score_text ∈ [0, 1]
-  │  (NLP/TF-IDF/BERT)  │
+  │  (NLP / TF-IDF + LR) │
   └─────────────────────┘
           │
           ▼
@@ -57,14 +57,13 @@ from __future__ import annotations
 
 import logging
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
 
 from phishguard.config import PhishGuardConfig, get_config
 from phishguard.features.extractor import FeatureExtractor, ExtractorConfig
 from phishguard.preprocessing.text_cleaner import (
     count_urgency_words,
-    has_urgency_words,
 )
 
 log = logging.getLogger(__name__)
@@ -266,8 +265,8 @@ class _DummyTextModel:
     Estima el score de riesgo del texto usando el conteo de palabras
     de urgencia en el texto preparado, normalizado por la longitud.
 
-    Es deliberadamente simple: el Hito 2 lo reemplaza con TF-IDF + SVM
-    o DistilBERT fine-tuned.
+    Es deliberadamente simple: el Hito 2 lo reemplaza con
+    TF-IDF + Logistic Regression.
     """
 
     # Umbral de densidad de palabras de urgencia considerado "alto riesgo"
@@ -443,7 +442,8 @@ class PhishGuardEngine:
         # ── Hito 3: Inicializar el explainer SHAP si está habilitado ──────────
         # Import local para evitar dependencias circulares a nivel de módulo.
         self._explainer = None
-        if getattr(self._config, "explainability", None) and                 getattr(self._config.explainability, "enabled", False):
+        if (getattr(self._config, "explainability", None)
+                and getattr(self._config.explainability, "enabled", False)):
             try:
                 from phishguard.explainability.explainer import PhishGuardExplainer
                 top_k = getattr(self._config.explainability, "top_k", 5)
@@ -512,6 +512,91 @@ class PhishGuardEngine:
         """
         cls._instance = None
 
+    # ── Métodos privados de etapa ─────────────────────────────────────────
+
+    def _extract_features(
+        self, subject: str, body: str,
+    ) -> tuple[dict[str, Any], list[str]]:
+        """
+        Paso 1 del flujo: extracción de features de metadatos.
+
+        Args:
+            subject: Asunto del correo (texto crudo).
+            body:    Cuerpo del correo (puede contener HTML).
+
+        Returns:
+            Tupla (metadata_features, urls) donde metadata_features es
+            el dict con los 30+ features numéricos y urls la lista de
+            URLs extraídas del cuerpo.
+        """
+        urls = self._extractor.get_urls_from_body(body)
+        metadata_features = self._extractor.extract_metadata_features(
+            subject=subject,
+            body=body,
+            urls=urls,
+        )
+        return metadata_features, urls
+
+    def _run_meta_stage(
+        self, metadata_features: dict[str, Any],
+    ) -> tuple[float, dict[str, float] | None]:
+        """
+        Pasos 2 + 2b del flujo: score de metadatos y explicación SHAP.
+
+        Args:
+            metadata_features: Dict con los features extraídos.
+
+        Returns:
+            Tupla (score_meta, explanation) donde score_meta ∈ [0, 1]
+            y explanation es el dict SHAP top-K o None.
+        """
+        score_meta = self._meta_model.predict_proba(metadata_features)
+        score_meta = float(min(max(score_meta, 0.0), 1.0))
+
+        log.debug(
+            "score_meta=%.4f | θ_meta=%.2f | model=%s",
+            score_meta,
+            self._config.gating.metadata_threshold,
+            self._meta_model.model_name,
+        )
+
+        explanation: dict[str, float] | None = None
+        if self._explainer is not None:
+            explanation = self._explainer.explain_metadata(metadata_features)
+            if explanation:
+                log.debug("SHAP top-%d: %s", len(explanation), explanation)
+
+        return score_meta, explanation
+
+    def _run_text_stage(
+        self, subject: str, body: str,
+    ) -> tuple[float, str]:
+        """
+        Paso 4 del flujo: score del submodelo de texto.
+
+        Args:
+            subject: Asunto del correo (texto crudo).
+            body:    Cuerpo del correo (puede contener HTML).
+
+        Returns:
+            Tupla (score_text, prepared_text) donde score_text ∈ [0, 1]
+            y prepared_text es el string limpio enviado al modelo.
+        """
+        prepared_text = self._extractor.extract_text_features(
+            subject=subject,
+            body=body,
+        )
+        score_text_raw = self._text_model.predict_proba(prepared_text)
+        score_text = float(min(max(score_text_raw, 0.0), 1.0))
+
+        log.debug(
+            "score_text=%.4f | model=%s",
+            score_text,
+            self._text_model.model_name,
+        )
+
+        return score_text, prepared_text
+
     # ── Método principal de inferencia ─────────────────────────────────────
 
     def predict(
@@ -544,30 +629,10 @@ class PhishGuardEngine:
         t_start = time.perf_counter()
 
         # ── Paso 1: Extracción de features ─────────────────────────────────
-        urls = self._extractor.get_urls_from_body(body)
-        metadata_features = self._extractor.extract_metadata_features(
-            subject=subject,
-            body=body,
-            urls=urls,
-        )
+        metadata_features, _urls = self._extract_features(subject, body)
 
-        # ── Paso 2: Score de metadatos ──────────────────────────────────────
-        score_meta = self._meta_model.predict_proba(metadata_features)
-        score_meta = float(min(max(score_meta, 0.0), 1.0))  # clipear por seguridad
-
-        log.debug(
-            "score_meta=%.4f | θ_meta=%.2f | model=%s",
-            score_meta,
-            self._config.gating.metadata_threshold,
-            self._meta_model.model_name,
-        )
-
-        # ── Paso 2b: Explicación SHAP (opcional, no bloquea si falla) ─────────
-        explanation: dict[str, float] | None = None
-        if self._explainer is not None:
-            explanation = self._explainer.explain_metadata(metadata_features)
-            if explanation:
-                log.debug("SHAP top-%d: %s", len(explanation), explanation)
+        # ── Paso 2 + 2b: Score de metadatos + SHAP ────────────────────────
+        score_meta, explanation = self._run_meta_stage(metadata_features)
 
         # ── Paso 3: Gating ──────────────────────────────────────────────────
         gating_activated = apply_gating(
@@ -581,7 +646,6 @@ class PhishGuardEngine:
         )
 
         if gating_activated:
-            # El submodelo de texto no se invoca → ahorro computacional
             log.debug("Gating activado — decisión directa sin submodelo de texto.")
             score_text = None
             score_final = score_meta
@@ -589,19 +653,8 @@ class PhishGuardEngine:
             text_model_name = None
         else:
             # ── Paso 4: Score de texto ──────────────────────────────────────
-            prepared_text = self._extractor.extract_text_features(
-                subject=subject,
-                body=body,
-            )
-            score_text_raw = self._text_model.predict_proba(prepared_text)
-            score_text = float(min(max(score_text_raw, 0.0), 1.0))
+            score_text, prepared_text = self._run_text_stage(subject, body)
             text_model_name = self._text_model.model_name
-
-            log.debug(
-                "score_text=%.4f | model=%s",
-                score_text,
-                self._text_model.model_name,
-            )
 
             # ── Paso 5: Fusión tardía ───────────────────────────────────────
             score_final = compute_fusion_score(
